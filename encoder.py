@@ -3,6 +3,7 @@ import numpy as np
 from PIL import Image
 from skimage.util import view_as_windows
 from scipy import fftpack
+from huffman import *
 
 # constants for transforming RGB to Y'CbCr
 Kr = 0.299  # Kr + Kg + Kb = 1
@@ -31,6 +32,15 @@ chroma_quantization_table = np.array([[17, 18, 24, 47, 99, 99, 99, 99],
 zigzag_idxs = np.array([0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28, 35,
                         42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63])
 
+# just a block to check correctness of DCT and quantization
+test_block = np.array([[-415, -33, -58, 35, 58, -51, -15, -12],
+                       [5, -34, 49, 18, 27, 1, -5, 3],
+                       [-46, 14, 80, -35, -50, 19, 7, -18],
+                       [-53, 21, 34, -20, 2, 34, 36, 12],
+                       [9, -2, 9, -5, -32, -15, 45, 37],
+                       [-8, 15, -16, 7, -8, 11, 4, 7],
+                       [19, -28, -2, -26, -2, 7, -44, -21],
+                       [18, 25, -12, -44, 35, 48, -37, -3]])
 
 def rgb2ycbcr(img):
     """
@@ -196,7 +206,67 @@ def quantize(blocks):
 
 
 def block_to_zigzag(block):
-    return np.array([block.ravel()[idx] for idx in zigzag_idxs])
+    return np.array([block.ravel()[idx] for idx in zigzag_idxs]).astype(int)
+
+
+def invert_bin_str(binstr):
+    # check if binstr is a binary string
+    return ''.join(map(lambda c: '0' if c == '1' else '1', binstr))
+
+
+def int_to_binary_string(n):
+    if n == 0:
+        return ''
+    binstr = bin(abs(n))[2:]
+    # change every 0 to 1 and vice verse when n is negative
+    return binstr if n > 0 else invert_bin_str(binstr)
+
+
+def bits_count(n):
+    n = abs(int(n))
+    result = 0
+    while n > 0:
+        n >>= 1
+        result += 1
+    return result
+
+
+def flatten(lst):
+    return [item for sublist in lst for item in sublist]
+
+
+def encode_ac(arr):
+    last_nonzero = -1
+    for idx, elem in enumerate(arr):  # find last non-zero element in zigzag array
+        if elem != 0:
+            last_nonzero = idx
+    symbols = []
+    values = []
+    zeros_length = 0
+    for idx, elem in enumerate(arr):
+        if idx > last_nonzero:
+            symbols.append((0, 0))
+            bin_str = int_to_binary_string(0)
+            values.append(bin_str)
+            break
+        elif elem == 0:
+            zeros_length += 1
+        else:
+            size = bits_count(elem)
+            symbols.append((zeros_length, size))
+            bin_str = int_to_binary_string(elem)
+            values.append(bin_str)
+            zeros_length = 0
+    return symbols, values
+
+
+def create_huffman_tables(dc, ac, blocks_count):
+    dc_l = HuffmanTree(np.vectorize(bits_count)(dc[:, 0]))
+    dc_c = HuffmanTree(np.vectorize(bits_count)(dc[:, 1:].flat))
+    luma_symbols, _ = encode_ac(ac[i, :, 0] for i in range(blocks_count))
+    chroma_symbols, _ = encode_ac(ac[i, :, j] for i in range(blocks_count) for j in [1, 2])
+    ac_l = HuffmanTree(flatten(luma_symbols))
+    ac_c = HuffmanTree(flatten(chroma_symbols))
 
 
 def encode(pixel_blocks):
@@ -205,23 +275,35 @@ def encode(pixel_blocks):
     :param pixel_blocks:
     :return:
     """
+    blocks_count = len(pixel_blocks)
+    dc = np.zeros((blocks_count, 3))
+    ac = np.zeros((blocks_count, 63, 3))
+    block_idx = 0
+
     for i, channel in enumerate(pixel_blocks):
         for block in channel:
-            block.ravel()  # ravel so I can use the 1D zigzag indexes
+            zigzag_arr = block_to_zigzag(block)  # transform block to array in a zigzag way
+            dc[block_idx, i] = zigzag_arr[0]
+            ac[block_idx, :, i] = zigzag_arr[1:]
+            block_idx += 1
 
+    # tables = create_huffman_tables(dc, ac, blocks_count)
+    # create_encoded_file(dc, ac, blocks_count, tables)
 
 # TODO: 3D scatter plot of Y'CbCr features
 # TODO: plot every channel in Y'CbCr separately
 if __name__ == '__main__':
-    image = Image.open('flag.bmp')
-    orig = np.array(image)
-    plt.imshow(orig)
-    plt.show()
-    ycbcr = rgb2ycbcr(orig)
-    plt.imshow(ycbcr)
-    plt.show()
-    ycbcr = downsample(ycbcr)
-    pixel_groups = create_pixel_groups(ycbcr)
-    transformed = discrete_cosine_transform(pixel_groups)
-    quantized = quantize(transformed)
+    # image = Image.open('flag.bmp')
+    # orig = np.array(image)
+    # plt.imshow(orig)
+    # plt.show()
+    # ycbcr = rgb2ycbcr(orig)
+    # plt.imshow(ycbcr)
+    # plt.show()
+    # ycbcr = downsample(ycbcr)
+    # pixel_groups = create_pixel_groups(ycbcr)
+    # transformed = discrete_cosine_transform(pixel_groups)
+    # quantized = quantize(transformed)
+    q = quantize(discrete_cosine_transform(list([test_block[np.newaxis, :]])))
+    encode(q)
     pass

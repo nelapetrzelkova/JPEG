@@ -5,10 +5,30 @@ from collections import Counter
 class HuffmanTree:
     class Node:
         def __init__(self, val, freq, left_child, right_child):
-            self.val = val
+            self.value = val
             self.freq = freq
             self.left_child = left_child
             self.right_child = right_child
+
+        def __eq__(self, other):
+            stup = self.value, self.freq, self.left_child, self.right_child
+            otup = other.value, other.freq, other.left_child, other.right_child
+            return stup == otup
+
+        def __nq__(self, other):
+            return not (self == other)
+
+        def __lt__(self, other):
+            return self.freq < other.freq
+
+        def __le__(self, other):
+            return self.freq < other.freq or self.freq == other.freq
+
+        def __gt__(self, other):
+            return not (self <= other)
+
+        def __ge__(self, other):
+            return not (self < other)
 
     def __init__(self, arr):
         self.tree = self.create_tree(arr)

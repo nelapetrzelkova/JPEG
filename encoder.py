@@ -33,7 +33,7 @@ zigzag_idxs = np.array([0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 
                         42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63])
 
 # just a block to check correctness of DCT and quantization
-test_block = np.array([[-415, -33, -58, 35, 58, -51, -15, -12],
+test_block = np.array([[-41, -33, -58, 35, 58, -51, -15, -12],
                        [5, -34, 49, 18, 27, 1, -5, 3],
                        [-46, 14, 80, -35, -50, 19, 7, -18],
                        [-53, 21, 34, -20, 2, 34, 36, 12],
@@ -41,6 +41,7 @@ test_block = np.array([[-415, -33, -58, 35, 58, -51, -15, -12],
                        [-8, 15, -16, 7, -8, 11, 4, 7],
                        [19, -28, -2, -26, -2, 7, -44, -21],
                        [18, 25, -12, -44, 35, 48, -37, -3]])
+
 
 def rgb2ycbcr(img):
     """
@@ -160,11 +161,12 @@ def dct_2d(pixel_blocks):
 
 
 def dct_1d(pixel_blocks):
-    N = pixel_blocks.shape[0]
+    N = pixel_blocks.shape[0]  # = 8
     coefficents = np.zeros(N)
     for m in range(N):
         for i in range(N):
             coefficents[m] += pixel_blocks[i] * np.cos((np.pi * m * (2 * i + 1)) / (2 * N))
+            # coefficents[m] += pixel_blocks[i] * np.cos((np.pi * m * (2 * i + 1)) / (2 * N))
     return coefficents
 
 
@@ -254,7 +256,7 @@ def encode_ac(arr):
         else:
             size = bits_count(elem)
             symbols.append((zeros_length, size))
-            bin_str = int_to_binary_string(elem)
+            bin_str = int_to_binary_string(int(elem))
             values.append(bin_str)
             zeros_length = 0
     return symbols, values
@@ -263,10 +265,62 @@ def encode_ac(arr):
 def create_huffman_tables(dc, ac, blocks_count):
     dc_l = HuffmanTree(np.vectorize(bits_count)(dc[:, 0]))
     dc_c = HuffmanTree(np.vectorize(bits_count)(dc[:, 1:].flat))
-    luma_symbols, _ = encode_ac(ac[i, :, 0] for i in range(blocks_count))
-    chroma_symbols, _ = encode_ac(ac[i, :, j] for i in range(blocks_count) for j in [1, 2])
-    ac_l = HuffmanTree(flatten(luma_symbols))
-    ac_c = HuffmanTree(flatten(chroma_symbols))
+    ac_l = HuffmanTree(flatten(encode_ac(ac[i, :, 0])[0]
+            for i in range(blocks_count)))
+    ac_c = HuffmanTree(flatten(encode_ac(ac[i, :, j])[0]
+                    for i in range(blocks_count) for j in [1, 2]))
+    tables = {'dc_l': dc_l.value_to_bitstring_table(),
+              'dc_c': dc_c.value_to_bitstring_table(),
+              'ac_l': ac_l.value_to_bitstring_table(),
+              'ac_c': ac_c.value_to_bitstring_table()}
+    return tables
+
+
+def uint_to_binstr(number, size):
+    return bin(number)[2:][-size:].zfill(size)
+
+
+def create_encoded_file(dc, ac, blocks_count, tables):
+    """
+    Save binary data to a file named 'out'
+    :param dc: data from the first element in the blocks (intensity)
+    :param ac: data from the all other elements in the blocks
+    :param blocks_count:
+    :param tables: huffman tables
+    :return:
+    """
+    with open("out", "w") as f:
+        for idx, table in enumerate(tables.values()):
+            f.write(uint_to_binstr(len(table), 16))
+            for key, val in table.items():
+                if idx < 2:     # dc tables
+                    f.write(uint_to_binstr(key, 4))
+                    f.write(uint_to_binstr(len(val), 4))
+                    f.write(val)
+                else:   # ac tables
+                    f.write(uint_to_binstr(key[0], 4))
+                    f.write(uint_to_binstr(key[1], 4))
+                    f.write(uint_to_binstr(len(val), 8))
+                    f.write(val)
+        f.write(uint_to_binstr(blocks_count, 32))
+        for block in range(blocks_count):
+            for channel in range(3):
+                bits = bits_count(dc[block, channel])
+                symbols, values = encode_ac(ac[block, :, channel])
+
+                if channel == 0:
+                    dc_table = tables['dc_l']
+                    ac_table = tables['ac_l']
+                else:
+                    dc_table = tables['dc_c']
+                    ac_table = tables['ac_c']
+
+                f.write(dc_table[bits])
+                f.write(int_to_binary_string(int(dc[block, channel])))
+
+                for i in range(len(symbols)):
+                    f.write(ac_table[tuple(symbols[i])])
+                    f.write(values[i])
 
 
 def encode(pixel_blocks):
@@ -275,7 +329,9 @@ def encode(pixel_blocks):
     :param pixel_blocks:
     :return:
     """
-    blocks_count = len(pixel_blocks)
+    blocks_count = 0
+    for channel in pixel_blocks:
+        blocks_count += len(channel)
     dc = np.zeros((blocks_count, 3))
     ac = np.zeros((blocks_count, 63, 3))
     block_idx = 0
@@ -287,23 +343,26 @@ def encode(pixel_blocks):
             ac[block_idx, :, i] = zigzag_arr[1:]
             block_idx += 1
 
-    # tables = create_huffman_tables(dc, ac, blocks_count)
-    # create_encoded_file(dc, ac, blocks_count, tables)
+    tables = create_huffman_tables(dc, ac, blocks_count)
+    create_encoded_file(dc, ac, blocks_count, tables)
+
+def dct2(a):
+    return fftpack.dct( fftpack.dct( a, axis=0), axis=1)
 
 # TODO: 3D scatter plot of Y'CbCr features
 # TODO: plot every channel in Y'CbCr separately
 if __name__ == '__main__':
-    # image = Image.open('flag.bmp')
-    # orig = np.array(image)
-    # plt.imshow(orig)
+    image = Image.open('circles.bmp')
+    orig = np.array(image)
+    plt.imshow(orig)
+    plt.show()
+    ycbcr = rgb2ycbcr(orig)
+    plt.imshow(ycbcr)
     # plt.show()
-    # ycbcr = rgb2ycbcr(orig)
-    # plt.imshow(ycbcr)
-    # plt.show()
-    # ycbcr = downsample(ycbcr)
-    # pixel_groups = create_pixel_groups(ycbcr)
-    # transformed = discrete_cosine_transform(pixel_groups)
+    ycbcr = downsample(ycbcr)
+    pixel_groups = create_pixel_groups(ycbcr)
+    transformed = discrete_cosine_transform(pixel_groups)
     # quantized = quantize(transformed)
-    q = quantize(discrete_cosine_transform(list([test_block[np.newaxis, :]])))
-    encode(q)
+    # encode(quantized)
+    library_dct = dct2(pixel_groups)
     pass

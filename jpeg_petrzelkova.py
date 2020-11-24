@@ -2,9 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 from skimage.util import view_as_windows
-from scipy import fftpack
-from huffman import *
-import rawpy
+import copy
 
 # constants for transforming RGB to Y'CbCr
 Kr = 0.299  # Kr + Kg + Kb = 1
@@ -181,7 +179,24 @@ def dct_1d(pixel_blocks, table):
     return coefficients/2
 
 
-def discrete_cosine_transform(pixel_blocks):
+def idct_2d(pixel_blocks, table):
+    step1 = np.apply_along_axis(idct_1d, axis=0, arr=pixel_blocks, table=table)
+    step2 = np.apply_along_axis(idct_1d, axis=1, arr=step1, table=table)
+    return step2
+
+
+def idct_1d(pixel_blocks, table):
+    N = pixel_blocks.shape[0]  # 8
+    coefficients = np.zeros(N)
+    for m in range(N):
+        for i in range(N):
+            coefficients[m] += pixel_blocks[i] * table[i,m]
+            alpha = 1/np.sqrt(2) if i == 0 else 1
+            coefficients[m] *= alpha
+    return coefficients/2
+
+
+def discrete_cosine_transform(pixel_blocks, inverse=False):
     """
     Applies discrete cosine transform to pixel groups (8 x 8) in each channel
     :param pixel_blocks: list (3) of lists of blocks (8 x 8)
@@ -192,8 +207,11 @@ def discrete_cosine_transform(pixel_blocks):
     for channel in pixel_blocks:  # for each channel
         transformed_channel = []
         for block in channel:  # for each pixel block (8 x 8)
-            shifted = block.astype(int)-128
-            transformed_channel.append(dct_2d(shifted, table))  # perform DCT
+            if not inverse:
+                shifted = block.astype(int)-128
+                transformed_channel.append(dct_2d(shifted, table))  # perform DCT
+            else:
+                transformed_channel.append(idct_2d(block, table)+128)
         transformed.append(transformed_channel)
     return transformed
 
@@ -211,172 +229,90 @@ def quantize(blocks):
         quantized_channel = []
         for block in channel:
             if i == 0:  # Y channel - we use luma quantization table
-                block = np.trunc(block / luma) * luma
+                block = np.round(block / luma)
             else:  # Cb or Cr channel - we use chroma quantization table
-                block = np.trunc(block / chroma) * chroma
+                block = np.round(block / chroma)
             quantized_channel.append(block)
         quantized.append(quantized_channel)
     return quantized
 
 
-def block_to_zigzag(block):
-    return np.array([block.ravel()[idx] for idx in zigzag_idxs]).astype(int)
-
-
-def invert_bin_str(binstr):
-    # check if binstr is a binary string
-    return ''.join(map(lambda c: '0' if c == '1' else '1', binstr))
-
-
-def int_to_binary_string(n):
-    if n == 0:
-        return ''
-    binstr = bin(abs(n))[2:]
-    # change every 0 to 1 and vice verse when n is negative
-    return binstr if n > 0 else invert_bin_str(binstr)
-
-
-def bits_count(n):
-    n = abs(int(n))
-    result = 0
-    while n > 0:
-        n >>= 1
-        result += 1
-    return result
-
-
-def flatten(lst):
-    return [item for sublist in lst for item in sublist]
-
-
-def encode_ac(arr):
-    last_nonzero = -1
-    for idx, elem in enumerate(arr):  # find last non-zero element in zigzag array
-        if elem != 0:
-            last_nonzero = idx
-    symbols = []
-    values = []
-    zeros_length = 0
-    for idx, elem in enumerate(arr):
-        if idx > last_nonzero:
-            symbols.append((0, 0))
-            bin_str = int_to_binary_string(0)
-            values.append(bin_str)
-            break
-        elif elem == 0:
-            zeros_length += 1
-        else:
-            size = bits_count(elem)
-            symbols.append((zeros_length, size))
-            bin_str = int_to_binary_string(int(elem))
-            values.append(bin_str)
-            zeros_length = 0
-    return symbols, values
-
-
-def create_huffman_tables(dc, ac, blocks_count):
-    dc_l = HuffmanTree(np.vectorize(bits_count)(dc[:, 0]))
-    dc_c = HuffmanTree(np.vectorize(bits_count)(dc[:, 1:].flat))
-    ac_l = HuffmanTree(flatten(encode_ac(ac[i, :, 0])[0]
-            for i in range(blocks_count)))
-    ac_c = HuffmanTree(flatten(encode_ac(ac[i, :, j])[0]
-                    for i in range(blocks_count) for j in [1, 2]))
-    tables = {'dc_l': dc_l.value_to_bitstring_table(),
-              'dc_c': dc_c.value_to_bitstring_table(),
-              'ac_l': ac_l.value_to_bitstring_table(),
-              'ac_c': ac_c.value_to_bitstring_table()}
-    return tables
-
-
-def uint_to_binstr(number, size):
-    return bin(number)[2:][-size:].zfill(size)
-
-
-def create_encoded_file(dc, ac, blocks_count, tables):
-    """
-    Save binary data to a file named 'out'
-    :param dc: data from the first element in the blocks (intensity)
-    :param ac: data from the all other elements in the blocks
-    :param blocks_count:
-    :param tables: huffman tables
-    :return:
-    """
-    with open("out", "w") as f:
-        for idx, table in enumerate(tables.values()):
-            f.write(uint_to_binstr(len(table), 16))
-            for key, val in table.items():
-                if idx < 2:     # dc tables
-                    f.write(uint_to_binstr(key, 4))
-                    f.write(uint_to_binstr(len(val), 4))
-                    f.write(val)
-                else:   # ac tables
-                    f.write(uint_to_binstr(key[0], 4))
-                    f.write(uint_to_binstr(key[1], 4))
-                    f.write(uint_to_binstr(len(val), 8))
-                    f.write(val)
-        f.write(uint_to_binstr(blocks_count, 32))
-        for block in range(blocks_count):
-            for channel in range(3):
-                bits = bits_count(dc[block, channel])
-                symbols, values = encode_ac(ac[block, :, channel])
-
-                if channel == 0:
-                    dc_table = tables['dc_l']
-                    ac_table = tables['ac_l']
-                else:
-                    dc_table = tables['dc_c']
-                    ac_table = tables['ac_c']
-
-                f.write(dc_table[bits])
-                f.write(int_to_binary_string(int(dc[block, channel])))
-
-                for i in range(len(symbols)):
-                    f.write(ac_table[tuple(symbols[i])])
-                    f.write(values[i])
-
-
-def encode(pixel_blocks):
-    """
-    Create a Huffman encoded bit stream in a zig-zag manner
-    :param pixel_blocks:
-    :return:
-    """
-    blocks_count = 0
-    for channel in pixel_blocks:
-        blocks_count += len(channel)
-    dc = np.zeros((blocks_count, 3))
-    ac = np.zeros((blocks_count, 63, 3))
-    block_idx = 0
-
-    for i, channel in enumerate(pixel_blocks):
+def dequantize(blocks):
+    dequantized = []
+    luma = luma_quantization_table
+    chroma = chroma_quantization_table
+    for i, channel in enumerate(blocks):
+        quantized_channel = []
         for block in channel:
-            zigzag_arr = block_to_zigzag(block)  # transform block to array in a zigzag way
-            dc[block_idx, i] = zigzag_arr[0]
-            ac[block_idx, :, i] = zigzag_arr[1:]
-            block_idx += 1
-
-    tables = create_huffman_tables(dc, ac, blocks_count)
-    create_encoded_file(dc, ac, blocks_count, tables)
-
-
-def dct2(a):
-    return fftpack.dct(fftpack.dct( a, axis=0), axis=1)
+            if i == 0:  # Y channel - we use luma quantization table
+                block *= luma
+            else:  # Cb or Cr channel - we use chroma quantization table
+                block *= chroma
+            quantized_channel.append(block)
+        dequantized.append(quantized_channel)
+    return dequantized
 
 
-# TODO: 3D scatter plot of Y'CbCr features
-# TODO: plot every channel in Y'CbCr separately
+def upsample(blocks, image, ratio=(2,2)):
+    block_size = 8
+    h, w, c = image.shape
+    print(image.shape)
+    rounded_w = int(np.ceil(w/block_size)*block_size)
+    rounded_h = int(np.ceil(h/block_size)*block_size)
+    print(rounded_h, rounded_w)
+    new_img = np.zeros((rounded_h, rounded_w, c))
+    for c, channel in enumerate(blocks):
+        for i, block in enumerate(channel):
+            if c == 0:
+                y = (i*block_size//w)*block_size
+                x = i*block_size%w
+                end_y = y + block_size
+                end_x = x + block_size
+                new_img[y:end_y, x:end_x, c] = block
+            else:
+                y = (i*(block_size*ratio[0])//w)*block_size*ratio[0]
+                x = i*(block_size*ratio[1])%w
+                end_y = y + block_size*ratio[0]
+                end_x = x + block_size*ratio[1]
+                block = np.repeat(np.repeat(block, 2, axis=0), 2, axis=1)
+                new_img[y:end_y, x:end_x, c] = block
+    return new_img
+
+
+def ycbcr2rgb(img):
+    """
+    Transform image in Y'CbCr color space to RGB color space
+    :param img: image in Y'CbCr, np array (h, w, 3)
+    :return: image in RGB color space, np array (h, w, 3)
+    """
+    coefficients = np.array([[1, 0, 2 - 2 * Kr],  # https://en.wikipedia.org/wiki/YCbCr#YCbCr
+                             [1, -(Kb / Kg) * (2 - 2 * Kb), -(Kr / Kg) * (2 - 2 * Kr)],
+                             [1, 2 - 2 * Kb, 0]])
+
+    img = img.astype(np.float)
+    img[:, :, 1:] -= 128
+    rgb = np.dot(img, coefficients.T)
+    rgb = np.where(rgb > 255, 255, rgb)
+    rgb = np.where(rgb < 0, 0, rgb)
+    return np.uint8(rgb)
+
+
 if __name__ == '__main__':
-    image = Image.open('circles.bmp')
-    orig = np.array(image)
-    plt.imshow(orig)
+    image = Image.open('sample.bmp')
+    image = np.array(image)
+    plt.imshow(image)
     plt.show()
-    ycbcr = rgb2ycbcr(orig)
+    ycbcr = rgb2ycbcr(image)
     plt.imshow(ycbcr)
-    # plt.show()
+    plt.show()
     downsampled = downsample(ycbcr)
     pixel_groups = create_pixel_groups(downsampled)
     transformed = discrete_cosine_transform(pixel_groups)
-    # quantized = quantize(transformed)
-    # encode(quantized)
-    library_dct = dct2(pixel_groups)
+    quantized = quantize(transformed)
+    dequantized = dequantize(copy.deepcopy(quantized))
+    idct = discrete_cosine_transform(dequantized, inverse=True)
+    upsampled = upsample(idct, image)
+    rgb = ycbcr2rgb(upsampled)
+    plt.imshow(rgb)
+    plt.show()
     pass
